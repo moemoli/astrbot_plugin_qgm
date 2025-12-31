@@ -2,12 +2,13 @@ from aiocqhttp import MessageSegment
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
+from astrbot.core.message.components import ComponentType, Reply
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
 
-@register("astrbot_plugin_qgm", "moemoli", "一款智能管理群聊的插件", "0.0.1")
+@register("astrbot_plugin_qgm", "moemoli", "一款智能管理群聊的插件", "0.0.2")
 class GMPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -17,15 +18,18 @@ class GMPlugin(Star):
 
     async def can_approve(
         self, event: AiocqhttpMessageEvent, uid: int, comment: str | None
-    ) -> bool:
+    ):
         """根据条件判断是否可以通过审核"""
+        reason = "等级不足"
         info = await event.bot.get_stranger_info(user_id=uid)
         i_level = info.get("qqLevel", 0)  # qq等级
         i_level_head = info.get("isHideQQLevel", 0)  # 是否隐藏QQ等级
         g_level = await self.get_kv_data(f"{event.get_group_id()}_level", "1")
         if g_level is None:
             g_level = "1"
-        return i_level_head != 1 and i_level >= int(g_level)
+        if i_level_head == 1:
+            reason = "隐藏QQ等级"
+        return (i_level_head != 1 and i_level >= int(g_level)), reason
 
     # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
     @filter.command("进群审核")
@@ -77,6 +81,15 @@ class GMPlugin(Star):
             f"已经设置本群的进群审核等级为: {level}"
         )  # 发送一条纯文本消息
 
+    @filter.command("撤回")
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    async def gm_cmd_revoke(self, event: AiocqhttpMessageEvent):
+        """这是一个撤回指定消息的指令"""  # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
+        for msg in event.message_obj.message:
+            if msg.type == ComponentType.Reply and isinstance(msg, Reply):
+                await event.bot.delete_msg(message_id=int(msg.id))
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     async def gm_event_request(self, event: AiocqhttpMessageEvent):
@@ -96,7 +109,10 @@ class GMPlugin(Star):
                     if isinstance(comment, str):
                         start = "答案："
                         comment = comment[comment.find(start) + len(start) :].strip()
-                    if await self.can_approve(event, uid, comment):
+                    approved, reason = await self.can_approve(event, uid, comment)
+                    if comment is None:
+                        comment = "(无)"
+                    if approved:
                         logger.info(f"用户 {uid} 通过审核，自动同意加群")
                         await event.bot.set_group_add_request(
                             flag=flag,
@@ -114,7 +130,7 @@ class GMPlugin(Star):
                             logger.info(f"用户 {uid} 未能通过审核，忽略: {comment}")
                             await event.bot.send_group_msg(
                                 message=MessageSegment.text(
-                                    f"用户 {uid}  未能通过审核，请手动处理。\n申请内容: {comment}"
+                                    f"用户 {uid}  未能通过审核，请手动处理。\n申请内容: {comment}\n原因: {reason}"
                                 ),
                                 group_id=gid,
                             )
@@ -123,11 +139,11 @@ class GMPlugin(Star):
                                 flag=flag,
                                 sub_type=sub_type,
                                 approve=False,
-                                reason="你不满足进群最低要求",
+                                reason=reason,
                             )
                             await event.bot.send_group_msg(
                                 message=MessageSegment.text(
-                                    f"用户 {uid}  未能通过审核，已自动拒绝。\n申请内容: {comment}"
+                                    f"用户 {uid}  未能通过审核，已自动拒绝。\n申请内容: {comment}\n原因: {reason}"
                                 ),
                                 group_id=gid,
                             )
